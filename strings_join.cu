@@ -1,9 +1,9 @@
-/**
+/*
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
  *  You may obtain a copy of the License at
  *
- *	  http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  *  Unless required by applicable law or agreed to in writing, software
  *  distributed under the License is distributed on an "AS IS" BASIS,
@@ -45,7 +45,7 @@ struct T_str_gather {
 	inline void operator()(thrust::device_ptr<unsigned int> &res, const size_t real_count, void* d, void* d_char) {
 		thrust::device_ptr<Str<len> > dev_ptr_char((Str<len>*)d_char);
 		thrust::device_ptr<Str<len> > dev_ptr((Str<len>*)d);
-		thrust::gather_if(res, res + real_count, res, dev_ptr, dev_ptr_char, is_positive());
+		thrust::gather_if(res, res + real_count, res, dev_ptr, dev_ptr_char, is_positive<unsigned int>());
 	}
 };
 

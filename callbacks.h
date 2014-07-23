@@ -11,7 +11,28 @@
  *  See the License for the specific language governing permissions and
  *  limitations under the License.
  */
-#include "cm.h"
 
-bool* filter(queue<string> op_type, queue<string> op_value, queue<int_type> op_nums,queue<float_type> op_nums_f, CudaSet* a,
-             unsigned int segment);
+//
+// ---------------------------------------------------
+// File:	callbacks.h
+// Purpose:	callback code for row and error delivery
+// Author:	Randolph
+// Date:	May 2014
+// ---------------------------------------------------
+//
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/*
+ * Row call back:
+ *      A modular call back for the display verb
+ *      This neds to be in C and a seperate file to stay modular
+ */
+extern int row_cb(int field_count, char **fields, char **ColNames);
+
+void error_cb(int severity, const char * err);
+#ifdef __cplusplus
+}
+#endif

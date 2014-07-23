@@ -15,11 +15,15 @@
 
 %{
 #include "bison.tab.h"
-#include <stdarg.h>
-#include <string.h>
+#include "atof.h"
+
+#ifdef _WIN64
+#define atoll(S) _atoi64(S)
+#else
+#include <unistd.h>
+#endif
 
 void yyerror(char *s, ...);
-int oldstate;
 #define YY_NEVER_INTERACTIVE 1
 #define YY_NO_UNISTD_H
 
@@ -31,8 +35,8 @@ int oldstate;
 
 %%
 
-AND {return AND; };
-OR {return OR; };
+AND {return AND; }
+OR {return OR; }
 LOAD { return LOAD; }
 FILTER { return FILTER; }
 DESC { return DESC; }
@@ -45,7 +49,6 @@ INTO { return INTO; }
 GROUP { return GROUP; }
 AS { return AS; }
 SELECT { return SELECT; }
-FROM { return FROM; }
 USING { return USING; }
 COUNT { return COUNT; }
 SUM { return SUM; }
@@ -54,7 +57,6 @@ MIN { return MIN; }
 MAX { return MAX; }
 LIMIT { return LIMIT; }
 ON { return ON; }
-STREAM { return STREAM; }
 BINARY { return BINARY; }
 DISTINCT { return DISTINCT; }
 LEFT { return LEFT; }
@@ -64,7 +66,6 @@ SORT {return SORT; }
 SEGMENTS {return SEGMENTS; }
 PRESORTED {return PRESORTED; }
 PARTITION {return PARTITION; }
-DELETE {return DELETE; }
 INSERT {return INSERT; }
 WHERE {return WHERE; }
 DISPLAY {return DISPLAY; }
@@ -79,14 +80,17 @@ TABLES {return TABLES; }
 TABLE {return TABLE; }
 DESCRIBE {return DESCRIBE; }
 DROP {return DROP; }
+DELETE {return DELETE; }
+FROM {return FROM; }
+LIKE {return LIKE; }
 
 
-[0-9]+ { yylval.intval = atoi(yytext);  return INTNUM; }
+[0-9]+ { yylval.intval = atoll(yytext);  return INTNUM; }
 -?[0-9]+"."[0-9]* |
 -?"."[0-9]+ |
 -?[0-9]+E[-+]?[0-9]+ |
 -?[0-9]+"."[0-9]*E[-+]?[0-9]+ |
--?"."[0-9]+E[-+]?[0-9]+ { yylval.floatval = atof(yytext) ;return APPROXNUM; }
+-?"."[0-9]+E[-+]?[0-9]+ { yylval.floatval = atoff(yytext) ;return APPROXNUM; }
 
 TRUE { yylval.intval = 1; return BOOL1; }
 UNKNOWN { yylval.intval = -1; return BOOL1; }

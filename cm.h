@@ -14,8 +14,6 @@
 
 #define EPSILON    (1.0E-8)
 
-using namespace std;
-
 #ifndef ADD_H_GUARD
 #define ADD_H_GUARD
 
@@ -32,12 +30,10 @@ using namespace std;
 #include <thrust/partition.h>
 #include <thrust/fill.h>
 #include <thrust/scan.h>
-#include <thrust/device_ptr.h>
 #include <thrust/unique.h>
 #include <thrust/gather.h>
 #include <thrust/sort.h>
 #include <thrust/merge.h>
-#include <thrust/reduce.h>
 #include <thrust/functional.h>
 #include <thrust/system/cuda/experimental/pinned_allocator.h>
 #include <queue>
@@ -65,7 +61,9 @@ typedef thrust::device_vector<unsigned int>::iterator   IndexIterator;
 typedef thrust::device_vector<int>::iterator   IndexIterator2;
 typedef thrust::device_ptr<int> IndexIterator1;
 
+using namespace std;
 using namespace mgpu;
+using namespace thrust::system::cuda::experimental;
 
 extern size_t int_size;
 extern size_t float_size;
@@ -89,6 +87,15 @@ extern std::clock_t tot;
 extern std::clock_t tot_fil;
 extern bool verbose;
 extern bool save_dict;
+extern bool interactive;
+extern map<string, char*> buffers;
+extern map<string, size_t> buffer_sizes;
+extern queue<string> buffer_names;
+extern size_t total_buffer_size;
+extern unsigned long long int* raw_decomp;
+extern unsigned int raw_decomp_length;
+extern size_t alloced_sz;
+extern void* alloced_tmp;
 extern ContextPtr context;
 
 
@@ -118,10 +125,11 @@ struct uninitialized_allocator
     }
 };
 
+template<typename T>
 struct is_positive
 {
     __host__ __device__
-    bool operator()(const int x)
+    bool operator()(const T x)
     {
         return (x >= 0);
     }
@@ -177,7 +185,6 @@ struct float_equal_to
             r = (long long int)((rhs+EPSILON)*100.0);
         else r = (long long int)(rhs*100.0);
 
-
         return (l == r);
     }
 };
@@ -202,54 +209,6 @@ struct float_upper_equal_to
 };
 
 
-
-struct Uint2Sum
-{
-    __host__ __device__  uint2 operator()(uint2& a, uint2& b)
-    {
-        //a.x += b.x;
-        a.y += b.y;
-        return a;
-    }
-};
-
-
-struct uint2_split
-{
-
-    const uint2* d_res;
-    unsigned int * output;
-
-    uint2_split(const uint2* _d_res, unsigned int * _output):
-        d_res(_d_res), output(_output) {}
-
-    template <typename IndexType>
-    __host__ __device__
-    void operator()(const IndexType & i) {
-
-        output[i] = d_res[i].y;
-
-    }
-};
-
-struct uint2_split_left
-{
-
-    const uint2* d_res;
-    unsigned int * output;
-
-    uint2_split_left(const uint2* _d_res, unsigned int * _output):
-        d_res(_d_res), output(_output) {}
-
-    template <typename IndexType>
-    __host__ __device__
-    void operator()(const IndexType & i) {
-
-        output[i] = d_res[i].x;
-
-    }
-};
-
 struct long_to_float
 {
     __host__ __device__
@@ -260,31 +219,6 @@ struct long_to_float
 };
 
 
-
-struct join_functor1
-{
-
-    const uint2* d_res;
-    const unsigned int* d_addr;
-    unsigned int * output;
-    unsigned int * output1;
-
-    join_functor1(const uint2* _d_res, const unsigned int * _d_addr, unsigned int * _output, unsigned int * _output1):
-        d_res(_d_res), d_addr(_d_addr), output(_output), output1(_output1) {}
-
-    template <typename IndexType>
-    __host__ __device__
-    void operator()(const IndexType & i) {
-
-        if (d_res[i].x || d_res[i].y) {
-            for(unsigned int z = 0; z < d_res[i].y; z++) {
-                output[d_addr[i] + z] = i;
-                output1[d_addr[i] + z] = d_res[i].x + z;
-            };
-        };
-    }
-};
-
 template<typename T>
   struct not_identity : public unary_function<T,T>
 {
@@ -294,13 +228,10 @@ template<typename T>
 }; 
 
 
-
-
 #ifdef _WIN64
 typedef unsigned __int64 uint64_t;
 #endif
 
-using namespace thrust::system::cuda::experimental;
 
 struct col_data {
 	unsigned int col_type;
@@ -364,12 +295,10 @@ public:
 	map<string, map<unsigned int, set<unsigned int> > > ref_joins; // columns referencing dataset segments 
 	map<string, set<unsigned int> > orig_segs;
 
-
     CudaSet(queue<string> &nameRef, queue<string> &typeRef, queue<int> &sizeRef, queue<int> &colsRef, size_t Recs, queue<string> &references, queue<string> &references_names);
     CudaSet(queue<string> &nameRef, queue<string> &typeRef, queue<int> &sizeRef, queue<int> &colsRef, size_t Recs, string file_name, unsigned int max);
     CudaSet(size_t RecordCount, unsigned int ColumnCount);
-    CudaSet(CudaSet* a, CudaSet* b, queue<string> op_sel, queue<string> op_sel_as);
-    CudaSet(queue<string> op_sel, queue<string> op_sel_as, queue<string> t_list);
+    CudaSet(CudaSet* a, CudaSet* b, queue<string> op_sel, queue<string> op_sel_as);    
     ~CudaSet();
     void allocColumnOnDevice(string colname, size_t RecordCount);
     void decompress_char_hash(string colname, unsigned int segment);
@@ -385,7 +314,7 @@ public:
     bool onDevice(string colname);
     CudaSet* copyDeviceStruct();
     void readSegmentsFromFile(unsigned int segNum, string colname, size_t offset);
-    void decompress_char(FILE* f, string colname, unsigned int segNum, size_t offset);
+    void decompress_char(FILE* f, string colname, unsigned int segNum, size_t offset, char* mem);
     void CopyColumnToGpu(string colname,  unsigned int segment, size_t offset = 0);
     void CopyColumnToGpu(string colname);
     void CopyColumnToHost(string colname, size_t offset, size_t RecCount);
@@ -448,6 +377,7 @@ size_t max_tmp(CudaSet* a);
 void setSegments(CudaSet* a, queue<string> cols);
 size_t max_char(CudaSet* a, set<string> field_names);
 size_t max_char(CudaSet* a, queue<string> field_names);
+size_t maxsz(CudaSet* a);
 void update_permutation_char(char* key, unsigned int* permutation, size_t RecCount, string SortType, char* tmp, unsigned int len);
 void update_permutation_char_host(char* key, unsigned int* permutation, size_t RecCount, string SortType, char* tmp, unsigned int len);
 void apply_permutation_char(char* key, unsigned int* permutation, size_t RecCount, char* tmp, unsigned int len);
@@ -458,7 +388,7 @@ size_t load_right(CudaSet* right, string colname, string f2, queue<string> op_g,
 unsigned int calc_right_partition(CudaSet* left, CudaSet* right, queue<string> op_sel);
 			
 uint64_t MurmurHash64A ( const void * key, int len, unsigned int seed );
-uint64_t MurmurHash64B ( const void * key, int len, unsigned int seed );
+uint64_t MurmurHash64S ( const void * key, int len, unsigned int seed, unsigned int step, size_t count );
 int_type reverse_op(int_type op_type);
 size_t getFreeMem();
 string int_to_string(int number);
