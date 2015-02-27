@@ -26,6 +26,7 @@
 #include <thrust/iterator/constant_iterator.h>
 #include <thrust/iterator/discard_iterator.h>
 #include <thrust/adjacent_difference.h>
+#include <thrust/binary_search.h>
 #include <thrust/transform.h>
 #include <thrust/partition.h>
 #include <thrust/fill.h>
@@ -39,6 +40,7 @@
 #include <queue>
 #include <string>
 #include <map>
+#include <unordered_map>
 #include <set>
 #include <vector>
 #include <stack>
@@ -51,15 +53,8 @@
 typedef long long int int_type;
 typedef unsigned int int32_type;
 typedef unsigned short int int16_type;
-typedef char int8_type;
-
+typedef unsigned char int8_type;
 typedef double float_type;
-
-typedef thrust::device_vector<int_type>::iterator ElementIterator_int;
-typedef thrust::device_vector<float_type>::iterator ElementIterator_float;
-typedef thrust::device_vector<unsigned int>::iterator   IndexIterator;
-typedef thrust::device_vector<int>::iterator   IndexIterator2;
-typedef thrust::device_ptr<int> IndexIterator1;
 
 using namespace std;
 using namespace mgpu;
@@ -84,27 +79,37 @@ extern void* alloced_tmp;
 extern unsigned int partition_count;
 extern map<string,string> setMap; //map to keep track of column names and set names
 extern std::clock_t tot;
-extern std::clock_t tot_fil;
+extern std::clock_t tot_disk;
 extern bool verbose;
 extern bool save_dict;
 extern bool interactive;
+extern bool ssd;
+extern bool delta;
+extern bool star;
+extern map<string, char*> index_buffers;
 extern map<string, char*> buffers;
 extern map<string, size_t> buffer_sizes;
 extern queue<string> buffer_names;
 extern size_t total_buffer_size;
-extern unsigned long long int* raw_decomp;
-extern unsigned int raw_decomp_length;
+extern thrust::device_vector<unsigned char> scratch;
 extern size_t alloced_sz;
-extern void* alloced_tmp;
 extern ContextPtr context;
+extern unordered_map<string, unordered_map<unsigned long long int, size_t> > char_hash; // mapping between column's string hashes and string positions
+extern bool scan_state;
+extern unsigned int statement_count;
+extern map<string, map<string, bool> > used_vars;
+extern map<string, unsigned int> cpy_bits;
+extern map<string, long long int> cpy_init_val;
+extern bool phase_copy;
 
+extern vector<void*> alloced_mem;
 
 template<typename T>
 struct uninitialized_host_allocator
         : std::allocator<T>
 {
     // note that construct is annotated as
-    __host__ __device__
+    __host__ 
     void construct(T *p)
     {
         // no-op
@@ -160,15 +165,19 @@ struct head_flag_predicate
 
 struct float_to_long
 {
-
     __host__ __device__
     long long int operator()(const float_type x)
     {
-        if ((long long int)((x+EPSILON)*100.0) > (long long int)(x*100.0))
-            return (long long int)((x+EPSILON)*100.0);
-        else return (long long int)(x*100.0);
-
-
+		if(x > 0) {
+			if ((long long int)((x+EPSILON)*100.0) > (long long int)(x*100.0))
+				return (long long int)((x+EPSILON)*100.0);
+			else return (long long int)(x*100.0);
+		}
+		else {	
+			if ((long long int)((x-EPSILON)*100.0) < (long long int)(x*100.0))
+				return (long long int)((x-EPSILON)*100.0);	
+			else return (long long int)(x*100.0);
+		};
     }
 };
 
@@ -244,7 +253,9 @@ class CudaSet
 {
 public:
     map<string, thrust::host_vector<int_type, pinned_allocator<int_type> > > h_columns_int;
+	//map<string, thrust::host_vector<int_type> > h_columns_int;
     map<string, thrust::host_vector<float_type, pinned_allocator<float_type> > > h_columns_float;	
+	//map<string, thrust::host_vector<float_type> > h_columns_float;	
     map<string, char*> h_columns_char;
 	/*std::vector<thrust::host_vector<int32_type, pinned_allocator<int32_type> > > h_columns_int32;
 	std::vector<thrust::host_vector<int16_type, pinned_allocator<int16_type> > > h_columns_int16;
@@ -254,28 +265,25 @@ public:
     map<string, thrust::device_vector<int_type > > d_columns_int;
     map<string, thrust::device_vector<float_type > > d_columns_float;	
     map<string, char*> d_columns_char;		
-	/*std::vector<thrust::device_vector<int32_type > > d_columns_int32;
-	std::vector<thrust::device_vector<int16_type > > d_columns_int16;
-	std::vector<thrust::device_vector<int8_type > > d_columns_int8;	
-	*/
 	
     map<string, size_t> char_size;
     thrust::device_vector<unsigned int> prm_d;
+	map<string, string> string_map; //maps char column names to string files, only select operator changes the original mapping
     char prm_index; // A - all segments values match, N - none match, R - some may match
+	map<string, map<int_type, unsigned int> > idx_dictionary_int; //stored in host memory
+	map<string, unsigned long long int*> idx_vals; // pointer to compressed values in gpu memory
 
     // to do filters in-place (during joins, groupby etc ops) we need to save a state of several queues's and a few misc. variables:
-    char* fil_s;
-    char* fil_f;
+    char* fil_s, * fil_f, sort_check;
     queue<string> fil_type,fil_value;
     queue<int_type> fil_nums;
     queue<float_type> fil_nums_f;
 
-    //map<unsigned int, size_t> type_index;
-    size_t mRecCount, maxRecs, hostRecCount, devRecCount, grp_count, segCount, prealloc_char_size, totalRecs;
+    size_t mRecCount, maxRecs, hostRecCount, devRecCount, grp_count, segCount, totalRecs;
     vector<string> columnNames;
 	map<string,bool> compTypes; // pfor delta or not
     map<string, FILE*> filePointers;
-    bool *grp;
+    thrust::device_vector<bool> grp;
     queue<string> columnGroups;
     bool not_compressed; // 1 = host recs are not compressed, 0 = compressed
     unsigned int mColumnCount;
@@ -286,26 +294,26 @@ public:
     map<string, unsigned int> type; // 0 - integer, 1-float_type, 2-char
     map<string, bool> decimal; // column is decimal - affects only compression
     map<string, unsigned int> grp_type; // type of group : SUM, AVG, COUNT etc
-    map<string, unsigned int> cols; // column positions in a file
+    map<unsigned int, string> cols; // column positions in a file
+	map<string, bool> map_like; //for LIKE processing
+	map<string, thrust::device_vector<unsigned int> > map_res; //also for LIKE processing
 	
 	//alternative to Bloom filters. Keep track of non-empty segment join results ( not the actual results
 	//but just boolean indicators.
 	map<string, string> ref_sets; // referencing datasets
 	map<string, string> ref_cols; // referencing dataset's column names
 	map<string, map<unsigned int, set<unsigned int> > > ref_joins; // columns referencing dataset segments 
-	map<string, set<unsigned int> > orig_segs;
+	vector< map<string, set<unsigned int> > > orig_segs;
 
     CudaSet(queue<string> &nameRef, queue<string> &typeRef, queue<int> &sizeRef, queue<int> &colsRef, size_t Recs, queue<string> &references, queue<string> &references_names);
     CudaSet(queue<string> &nameRef, queue<string> &typeRef, queue<int> &sizeRef, queue<int> &colsRef, size_t Recs, string file_name, unsigned int max);
-    CudaSet(size_t RecordCount, unsigned int ColumnCount);
+    CudaSet(const size_t RecordCount, const unsigned int ColumnCount);
+	CudaSet(queue<string> op_sel, const queue<string> op_sel_as);
     CudaSet(CudaSet* a, CudaSet* b, queue<string> op_sel, queue<string> op_sel_as);    
     ~CudaSet();
     void allocColumnOnDevice(string colname, size_t RecordCount);
-    void decompress_char_hash(string colname, unsigned int segment);
-    void add_hashed_strings(string field, unsigned int segment);
     void resize(size_t addRecs);
     void resize_join(size_t addRecs);
-    void reserve(size_t Recs);
     void deAllocColumnOnDevice(string colIndex);
     void allocOnDevice(size_t RecordCount);
     void deAllocOnDevice();
@@ -314,7 +322,8 @@ public:
     bool onDevice(string colname);
     CudaSet* copyDeviceStruct();
     void readSegmentsFromFile(unsigned int segNum, string colname, size_t offset);
-    void decompress_char(FILE* f, string colname, unsigned int segNum, size_t offset, char* mem);
+	int_type readSsdSegmentsFromFile(unsigned int segNum, string colname, size_t offset, thrust::host_vector<unsigned int>& prm_vh, CudaSet* dest);
+	int_type readSsdSegmentsFromFileR(unsigned int segNum, string colname, thrust::host_vector<unsigned int>& prm_vh, thrust::host_vector<unsigned int>& dest);
     void CopyColumnToGpu(string colname,  unsigned int segment, size_t offset = 0);
     void CopyColumnToGpu(string colname);
     void CopyColumnToHost(string colname, size_t offset, size_t RecCount);
@@ -332,8 +341,9 @@ public:
 	void reWriteHeader(string file_name, string colname, unsigned int tot_segs, size_t newRecs, size_t maxRecs1);
     void writeSortHeader(string file_name);
     void Display(unsigned int limit, bool binary, bool term);
-    void Store(string file_name, char* sep, unsigned int limit, bool binary, bool term = 0);
-    void compress_char(string file_name, string colname, size_t mCount, size_t offset);
+    void Store(const string file_name, const char* sep, const unsigned int limit, const bool binary, const bool term = 0);
+    void compress_char(const string file_name, const string colname, const size_t mCount, const size_t offset, const unsigned int segment);
+	void compress_int(const string file_name, const string colname, const size_t mCount);
     bool LoadBigFile(FILE* file_p);
     void free();
     bool* logical_and(bool* column1, bool* column2);
@@ -351,14 +361,15 @@ public:
     int_type* op(int_type* column1, int_type d, string op_type, int reverse);
     float_type* op(int_type* column1, float_type d, string op_type, int reverse);
     float_type* op(float_type* column1, float_type d, string op_type,int reverse);
+	char loadIndex(const string index_name, const unsigned int segment);
 
 protected:
 
     void initialize(queue<string> &nameRef, queue<string> &typeRef, queue<int> &sizeRef, queue<int> &colsRef, size_t Recs, string file_name);
     void initialize(queue<string> &nameRef, queue<string> &typeRef, queue<int> &sizeRef, queue<int> &colsRef, size_t Recs, queue<string> &references, queue<string> &references_names);
-    void initialize(size_t RecordCount, unsigned int ColumnCount);
+    void initialize(const size_t RecordCount, const unsigned int ColumnCount);
     void initialize(CudaSet* a, CudaSet* b, queue<string> op_sel, queue<string> op_sel_as);
-    void initialize(queue<string> op_sel, queue<string> op_sel_as, queue<string> t_list);
+    void initialize(queue<string> op_sel, const queue<string> op_sel_as);
 };
 
 extern map<string,CudaSet*> varNames; //  STL map to manage CudaSet variables
@@ -367,36 +378,36 @@ void allocColumns(CudaSet* a, queue<string> fields);
 void gatherColumns(CudaSet* a, CudaSet* t, string field, unsigned int segment, size_t& count);
 size_t getSegmentRecCount(CudaSet* a, unsigned int segment);
 void copyColumns(CudaSet* a, queue<string> fields, unsigned int segment, size_t& count, bool rsz = 0, bool flt = 1);
+void copyFinalize(CudaSet* a, queue<string> fields);
 void setPrm(CudaSet* a, CudaSet* b, char val, unsigned int segment);
 void mygather(string colname, CudaSet* a, CudaSet* t, size_t offset, size_t g_size);
 void mycopy(string colname, CudaSet* a, CudaSet* t, size_t offset, size_t g_size);
-size_t load_queue(queue<string> c1, CudaSet* right, bool str_join, string f2, size_t &rcount,
+size_t load_queue(queue<string> c1, CudaSet* right, string f2, size_t &rcount,
                   unsigned int start_segment, unsigned int end_segment, bool rsz = 1, bool flt = 1);
 size_t max_char(CudaSet* a);
-size_t max_tmp(CudaSet* a);
 void setSegments(CudaSet* a, queue<string> cols);
-size_t max_char(CudaSet* a, set<string> field_names);
 size_t max_char(CudaSet* a, queue<string> field_names);
-size_t maxsz(CudaSet* a);
-void update_permutation_char(char* key, unsigned int* permutation, size_t RecCount, string SortType, char* tmp, unsigned int len);
 void update_permutation_char_host(char* key, unsigned int* permutation, size_t RecCount, string SortType, char* tmp, unsigned int len);
 void apply_permutation_char(char* key, unsigned int* permutation, size_t RecCount, char* tmp, unsigned int len);
 void apply_permutation_char_host(char* key, unsigned int* permutation, size_t RecCount, char* res, unsigned int len);
 size_t load_right(CudaSet* right, string colname, string f2, queue<string> op_g, queue<string> op_sel,
-                        queue<string> op_alt, bool decimal_join, bool& str_join, 
-                        size_t& rcount, unsigned int start_seg, unsigned int end_seg, bool rsz);
-unsigned int calc_right_partition(CudaSet* left, CudaSet* right, queue<string> op_sel);
-			
+                  queue<string> op_alt, bool decimal_join, size_t& rcount, unsigned int start_seg, unsigned int end_seg, bool rsz);		
 uint64_t MurmurHash64A ( const void * key, int len, unsigned int seed );
 uint64_t MurmurHash64S ( const void * key, int len, unsigned int seed, unsigned int step, size_t count );
 int_type reverse_op(int_type op_type);
 size_t getFreeMem();
-string int_to_string(int number);
-void delete_records(char* f);
-void insert_records(char* f, char* s);
+void delete_records(const char* f);
+void insert_records(const char* f, const char* s);
 void save_col_data(map<string, map<string, col_data> >& data_dict, string file_name);
 void load_col_data(map<string, map<string, col_data> >& data_dict, string file_name);
 bool var_exists(CudaSet* a, string name);
+int file_exist (const char *filename);
+bool check_bitmaps_exist(CudaSet* left, CudaSet* right); 
+bool check_bitmap_file_exist(CudaSet* left, CudaSet* right); 
+void check_sort(const string str, const char* rtable, const char* rid);
+void filter_op(const char *s, const char *f, unsigned int segment);
+void update_char_permutation(CudaSet* a, string colname, unsigned int* raw_ptr, string ord, void* temp, bool host);
+void alloc_pool(unsigned int maxRecs);
 
 #endif
 

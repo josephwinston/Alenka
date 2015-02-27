@@ -14,6 +14,7 @@
 
 // PFOR and PFOR-DELTA Compression and decompression routines
 
+
 #include <stdio.h>
 #include <iomanip>
 #include <thrust/extrema.h>
@@ -21,8 +22,9 @@
 
 using namespace std;
 
-unsigned long long int* raw_decomp = NULL;
+unsigned long long int* raw_decomp = nullptr;
 unsigned int raw_decomp_length = 0;
+bool phase_copy = 0;
 
 std::map<string, unsigned int> cnt_counts;
 string curr_file;
@@ -30,16 +32,16 @@ string curr_file;
 struct int64_to_char
 {
     __host__ __device__
-    char operator()(const int_type x)
+    unsigned char operator()(const int_type x)
     {
-        return (char)x;
+        return (unsigned char)x;
     }
 };
 
 struct char_to_int64
 {
     __host__ __device__
-    int_type operator()(const char x)
+    int_type operator()(const unsigned char x)
     {
         return (int_type)x;
     }
@@ -225,27 +227,21 @@ struct decompress_functor_str
 
 
 
-size_t pfor_decompress(void* destination, void* host, void* d_v, void* s_v)
+size_t pfor_decompress(void* destination, void* host, void* d_v, void* s_v, string colname)
 {
-    unsigned int bits, cnt, fit_count, orig_recCount;
-    long long int  orig_lower_val;
     unsigned int bit_count = 64;
-    unsigned int comp_type;
-    long long int start_val;
-
-    cnt = ((unsigned int*)host)[0];
-    orig_recCount = ((unsigned int*)((char*)host + cnt))[7];
-    bits = ((unsigned int*)((char*)host + cnt))[8];
-    orig_lower_val = ((long long int*)((unsigned int*)((char*)host + cnt) + 9))[0];
-    fit_count = ((unsigned int*)((char*)host + cnt))[11];
-    start_val = ((long long int*)((unsigned int*)((char*)host + cnt) + 12))[0];
-    comp_type = ((unsigned int*)((char*)host + cnt))[14];
-    comp_type = ((unsigned int*)host)[5];
+    auto cnt = ((unsigned int*)host)[0];
+    auto orig_recCount = ((unsigned int*)((char*)host + cnt))[7];
+    auto bits = ((unsigned int*)((char*)host + cnt))[8];
+    auto orig_lower_val = ((long long int*)((unsigned int*)((char*)host + cnt) + 9))[0];
+    auto fit_count = ((unsigned int*)((char*)host + cnt))[11];
+    auto start_val = ((long long int*)((unsigned int*)((char*)host + cnt) + 12))[0];
+    auto comp_type = ((unsigned int*)host)[5];
 
     //cout << "Decomp Header " <<  orig_recCount << " " << bits << " " << orig_lower_val << " " << cnt << " " << fit_count << " " << comp_type << endl;
 
     if(raw_decomp_length < cnt) {
-        if(raw_decomp != NULL) {
+        if(raw_decomp) {
             cudaFree(raw_decomp);
         };
         cudaMalloc((void **) &raw_decomp, cnt);
@@ -253,7 +249,10 @@ size_t pfor_decompress(void* destination, void* host, void* d_v, void* s_v)
     };
 
     cudaMemcpy( (void*)raw_decomp, (void*)((unsigned int*)host + 6), cnt, cudaMemcpyHostToDevice);
+
+
     thrust::device_ptr<int_type> d_int((int_type*)destination);
+
 
     if(comp_type == 1) {
         thrust::device_ptr<unsigned int> dd_v((unsigned int*)d_v);
@@ -272,26 +271,52 @@ size_t pfor_decompress(void* destination, void* host, void* d_v, void* s_v)
         thrust::inclusive_scan(d_int, d_int + orig_recCount, d_int);
     }
     else {
-        if(bits == 8) {
-            thrust::device_ptr<char> src((char*)raw_decomp);
-            thrust::transform(src, src+orig_recCount, d_int, char_to_int64());
-        }
-        else if(bits == 16) {
-            thrust::device_ptr<unsigned short int> src((unsigned short int*)raw_decomp);
-            thrust::transform(src, src+orig_recCount, d_int, int16_to_int64());
-        }
-        else if(bits == 32) {
-            thrust::device_ptr<unsigned int> src((unsigned int*)raw_decomp);
-            thrust::transform(src, src+orig_recCount, d_int, int32_to_int64());
-        }
-        else {
-            thrust::device_ptr<int_type> src((int_type*)raw_decomp);
-            thrust::copy(src, src+orig_recCount, d_int);
-        };
-        thrust::constant_iterator<int_type> iter(orig_lower_val);
-        thrust::transform(d_int, d_int+orig_recCount, iter, d_int, thrust::plus<int_type>());
-
+		if(!phase_copy) {
+			if(bits == 8) {
+				thrust::device_ptr<unsigned char> src((unsigned char*)raw_decomp);
+				thrust::transform(src, src+orig_recCount, d_int, char_to_int64());
+			}
+			else if(bits == 16) {
+				thrust::device_ptr<unsigned short int> src((unsigned short int*)raw_decomp);
+				thrust::transform(src, src+orig_recCount, d_int, int16_to_int64());
+			}
+			else if(bits == 32) {
+				thrust::device_ptr<unsigned int> src((unsigned int*)raw_decomp);
+				thrust::transform(src, src+orig_recCount, d_int, int32_to_int64());
+			}
+			else {
+				thrust::device_ptr<int_type> src((int_type*)raw_decomp);
+				thrust::copy(src, src+orig_recCount, d_int);
+			};
+			thrust::constant_iterator<int_type> iter(orig_lower_val);
+			thrust::transform(d_int, d_int+orig_recCount, iter, d_int, thrust::plus<int_type>());
+		}
+		else {
+			cpy_bits[colname] = bits;
+			cpy_init_val[colname] = orig_lower_val;
+			if(bits == 8) {
+				thrust::device_ptr<unsigned char> src((unsigned char*)raw_decomp);
+				thrust::device_ptr<unsigned char> dest((unsigned char*)destination);
+				thrust::copy(src, src+orig_recCount, dest);
+			}
+			else if(bits == 16) {
+				thrust::device_ptr<unsigned short int> src((unsigned short int*)raw_decomp);
+				thrust::device_ptr<unsigned short int> dest((unsigned short int*)destination);
+				thrust::copy(src, src+orig_recCount, dest);
+			}
+			else if(bits == 32) {
+				thrust::device_ptr<unsigned int> src((unsigned int*)raw_decomp);
+				thrust::device_ptr<unsigned int> dest((unsigned int*)destination);
+				thrust::copy(src, src+orig_recCount, dest);			
+			}
+			else {
+				thrust::device_ptr<int_type> src((int_type*)raw_decomp);
+				thrust::copy(src, src+orig_recCount, d_int);
+			};			
+			//cout << "using phase copy on " << colname << " " << bits << endl;
+		};	
     };
+	
 
     return orig_recCount;
 }
@@ -299,6 +324,7 @@ size_t pfor_decompress(void* destination, void* host, void* d_v, void* s_v)
 
 template< typename T>
 void pfor_delta_compress(void* source, size_t source_len, string file_name, thrust::host_vector<T, pinned_allocator<T> >& host, bool tp)
+//void pfor_delta_compress(void* source, size_t source_len, string file_name, thrust::host_vector<T>& host, bool tp)
 {
     long long int orig_lower_val, orig_upper_val, start_val, real_lower, real_upper;
     unsigned int  bits, recCount;
@@ -441,8 +467,9 @@ void pfor_delta_compress(void* source, size_t source_len, string file_name, thru
 // non sorted compressed fields should have 1,2,4 or 8 byte values for direct operations on compressed values
 template< typename T>
 void pfor_compress(void* source, size_t source_len, string file_name, thrust::host_vector<T, pinned_allocator<T> >& host,  bool tp)
+//void pfor_compress(void* source, size_t source_len, string file_name, thrust::host_vector<T>& host,  bool tp)
 {
-    unsigned int recCount;
+    unsigned int recCount = source_len/int_size;
     long long int orig_lower_val;
     long long int orig_upper_val;
     unsigned int  bits;
@@ -453,31 +480,30 @@ void pfor_compress(void* source, size_t source_len, string file_name, thrust::ho
 
     // check if sorted
 
-    if (tp == 0) {
-        recCount = source_len/int_size;
-        thrust::device_ptr<int_type> s((int_type*)source);
-        sorted = thrust::is_sorted(s, s+recCount);
-    }
-    else {
-        recCount = source_len/float_size;
-        thrust::device_ptr<long long int> s((long long int*)source);
-        sorted = thrust::is_sorted(s, s+recCount);
+
+    if(delta) {
+        if (tp == 0) {
+            thrust::device_ptr<int_type> s((int_type*)source);
+            sorted = thrust::is_sorted(s, s+recCount);
+        }
+        else {
+            recCount = source_len/float_size;
+            thrust::device_ptr<long long int> s((long long int*)source);
+            sorted = thrust::is_sorted(s, s+recCount);
+        };
+        //cout << "file " << file_name << " is sorted " << sorted << endl;
+
+        if(sorted) {
+            pfor_delta_compress(source, source_len, file_name, host, tp);
+            return;
+        };
     };
-    //cout << "file " << file_name << " is sorted " << sorted << endl;
-
-    if(sorted) {
-        pfor_delta_compress(source, source_len, file_name, host, tp);
-        return;
-    };
 
 
     if (tp == 0) {
         thrust::device_ptr<int_type> s((int_type*)source);
-
         orig_lower_val = *(thrust::min_element(s, s + recCount));
         orig_upper_val = *(thrust::max_element(s, s + recCount));
-
-        //cout << "orig " << orig_upper_val << " " <<  orig_lower_val << endl;
         //cout << "We need " << (unsigned int)ceil(log2((double)((orig_upper_val - orig_lower_val) + 1))) << " bits to encode original range of " << orig_lower_val << " to " << orig_upper_val << endl;
         bits = (unsigned int)ceil(log2((double)((orig_upper_val - orig_lower_val) + 1)));
     }
@@ -487,7 +513,6 @@ void pfor_compress(void* source, size_t source_len, string file_name, thrust::ho
 
         orig_lower_val = *(thrust::min_element(s, s + recCount));
         orig_upper_val = *(thrust::max_element(s, s + recCount));
-
         //cout << "We need " << (unsigned int)ceil(log2((double)((orig_upper_val - orig_lower_val) + 1))) << " bits to encode original range of " << orig_lower_val << " to " << orig_upper_val << endl;
         bits = (unsigned int)ceil(log2((double)((orig_upper_val - orig_lower_val) + 1)));
     };

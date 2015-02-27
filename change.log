@@ -1,3 +1,9 @@
+11/02/2014
+  Modified the storage model for strings. Now Alenka works with string hashes as opposed to actual strings.	
+
+08/11/2014 
+  Added support for bitmap join indexes. Added SSD optimizations for storage engine.
+
 02/26/2014
   Added a simple built-in data dictionary.	
 
